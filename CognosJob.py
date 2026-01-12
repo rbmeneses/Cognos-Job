@@ -4,11 +4,13 @@ import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
-
+import json
+import os
 # --- Imports Adicionais para Geração de Arquivos ---
 import io
 from docx import Document
-
+import re
+import urllib3
 # --- CONFIGURAÇÃO E ESTILO ---
 st.set_page_config(page_title="Cognos Job AI Pro", page_icon="⚡", layout="wide")
 
@@ -17,20 +19,63 @@ st.markdown("""
     .job-card { background-color: #1e2229; padding: 20px; border-radius: 12px; border: 1px solid #30363d; margin-bottom: 15px; }
     .stButton>button { border-radius: 8px; font-weight: bold; }
     .match-score { font-size: 2em; font-weight: bold; text-align: center; }
-    .st-emotion-cache-16txtl3 { padding-top: 2rem; } /* Ajusta o padding do topo das abas */
+    .st-emotion-cache-16txtl3 { padding-top: 2rem; }
 </style>
 """, unsafe_allow_html=True)
+KEYS_FILE = "user_keys.json"
+
+def load_keys_from_file():
+    """Carrega as chaves do arquivo JSON se ele existir."""
+    if os.path.exists(KEYS_FILE):
+        try:
+            with open(KEYS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+# ==============================================================================
+# 🚨 CORREÇÃO: MOVA ESTE BLOCO PARA CÁ (ANTES DO SESSION STATE)
+# ==============================================================================
+
+# Nome do arquivo onde as chaves serão salvas
+KEYS_FILE = "user_keys.json"
+
+def load_keys_from_file():
+    """Carrega as chaves do arquivo JSON se ele existir."""
+    if os.path.exists(KEYS_FILE):
+        try:
+            with open(KEYS_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_keys_to_file(g_key, g_cx, gem_key):
+    """Salva as chaves no arquivo JSON."""
+    data = {"g_key": g_key, "g_cx": g_cx, "gem_key": gem_key}
+    with open(KEYS_FILE, "w") as f:
+        json.dump(data, f)
+
+# ==============================================================================
 
 # --- INICIALIZAÇÃO DO ESTADO DA SESSÃO ---
-# CORREÇÃO 1: Garante que todas as chaves existem na sessão desde o início.
+# AGORA VAI FUNCIONAR POIS A FUNÇÃO JÁ FOI LIDA ACIMA
+saved_keys = load_keys_from_file() 
+
 keys_to_initialize = [
     'g_key', 'g_cx', 'gem_key', 'user_cv', 'search_results', 
     'selected_job', 'job_description', 'analysis_result',
     'cv_text_out', 'cl_text_out', 'inst_out'
 ]
+
 for key in keys_to_initialize:
     if key not in st.session_state:
-        st.session_state[key] = None
+        # Se a chave for uma das credenciais e existir no arquivo salvo, usa ela
+        if key in saved_keys and saved_keys[key]:
+            st.session_state[key] = saved_keys[key]
+        else:
+            st.session_state[key] = None
 
 # --- FUNÇÕES DE NÚCLEO (COM CACHE) ---
 @st.cache_data(show_spinner="Buscando vagas no Google...")
@@ -44,23 +89,167 @@ def util_google_search(query, api_key, cx_id):
         st.error(f"Erro na API do Google: {e}")
         return []
 
-@st.cache_data(show_spinner="Extraindo texto da vaga...")
+
+
+@st.cache_data(show_spinner="Lendo conteúdo da vaga com IA Reader...")
+
+def clean_html_noise(soup):
+    """
+    Remove poluição visual com lógica baseada em CONTEÚDO, não só classes.
+    """
+    # 1. Remove tags estruturais inúteis para IA
+    for element in soup(['script', 'style', 'noscript', 'iframe', 'svg', 'header', 'footer', 'nav', 'aside', 'form', 'button']):
+        element.decompose()
+
+    # 2. COOKIE NUKE: Remove elementos que contenham texto de consentimento
+    # Isso resolve o problema do seu Print 1
+    blacklist_phrases = ['utilizamos cookies', 'sua privacidade', 'aceitar todos', 'política de privacidade', 'configurações de cookies']
+    
+    # Varre divs, sections e spans
+    for tag in soup.find_all(['div', 'section', 'span', 'p', 'aside']):
+        # Se o texto for curto (banner) e tiver palavras chave de cookie
+        text_content = tag.get_text(" ", strip=True).lower()
+        if len(text_content) < 400 and any(phrase in text_content for phrase in blacklist_phrases):
+            tag.decompose()
+
+    return soup
+
+@st.cache_data(show_spinner="Acessando site e quebrando proteções...")
 def scrape_job_description(url):
-    """Extrai o texto principal de uma página de vaga."""
+    """
+    Extração Resiliente: Foca em trazer TEXTO, ignorando formatação se necessário.
+    """
+    extracted_text = ""
+    
+    # Headers simulando um Chrome real no Windows
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status() # Lança erro para status HTTP ruins
-        soup = BeautifulSoup(response.content, 'html.parser')
-        # Remove scripts e estilos para limpar o texto
-        for script_or_style in soup(['script', 'style']):
-            script_or_style.decompose()
-        text = soup.get_text(separator='\n', strip=True)
-        return text
-    except requests.exceptions.RequestException as e:
-        return f"Erro ao acessar a página da vaga: {e}. A análise usará apenas o snippet."
+        # verify=False pula erros de SSL que bloqueiam muitos scrapers
+        response = requests.get(url, headers=headers, timeout=20, verify=False)
+        
+        # Detecção automática de encoding (resolve caracteres estranhos)
+        response.encoding = response.apparent_encoding
+        
+        if response.status_code != 200:
+            return f"Erro ao acessar site: Status {response.status_code}"
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 1. Limpeza Pesada (Remove o banner de cookie)
+        soup = clean_html_noise(soup)
+        
+        # 2. Estratégia de Extração "Rede de Arrasto"
+        # Em vez de tentar achar o container perfeito, vamos pegar todo texto relevante
+        # Sites como o da Solor usam 'accordions', o texto está lá, só escondido no CSS.
+        # O BeautifulSoup VÊ o texto escondido, nós só precisamos pegar.
+        
+        text_blocks = []
+        # Pega parágrafos, itens de lista e divs de texto
+        for tag in soup.find_all(['p', 'li', 'h1', 'h2', 'h3', 'div']):
+            text = tag.get_text(" ", strip=True)
+            # Filtra linhas muito curtas ou vazias
+            if len(text) > 30: 
+                text_blocks.append(text)
+
+        # Remove duplicatas mantendo a ordem
+        seen = set()
+        clean_blocks = [x for x in text_blocks if not (x in seen or seen.add(x))]
+        
+        extracted_text = "\n\n".join(clean_blocks)
+
     except Exception as e:
-        return f"Erro inesperado ao processar a página: {e}. A análise usará apenas o snippet."
+        return f"Erro crítico na extração: {str(e)}. Tente copiar e colar manual."
+
+    # Validação Final
+    if len(extracted_text) < 100:
+        # Fallback para Jina se o requests falhar
+        try:
+            return requests.get(f"https://r.jina.ai/{url}", timeout=10).text
+        except:
+            return "⚠️ O site bloqueou o acesso ou o conteúdo é gerado 100% via Javascript complexo. Por favor, copie o texto da vaga e cole na aba 'Texto Manual'."
+        
+    return extracted_text
+
+@st.cache_data(show_spinner="Web Specter extraindo dados...")
+def scrape_job_description(url):
+    """
+    Extração Híbrida v2.0:
+    Tenta Jina (bom para JS) -> Se falhar ou vier sujo -> Usa Requests com headers Black + Limpeza Cirúrgica.
+    """
+    extracted_text = ""
+    
+    # --- TENTATIVA 1: Lógica Manual Robustecida (Prioridade para limpeza local) ---
+    # Motivo: O Jina às vezes traz o banner de cookie renderizado. Nossa limpeza local é mais segura.
+    try:
+        # Headers anti-bloqueio (Black Edition)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        # Se der erro 403/401 (bloqueio), pula para o Jina
+        if response.status_code in [403, 401, 503]:
+            raise Exception("Bloqueio de WAF detectado")
+
+        response.encoding = response.apparent_encoding # Corrige acentuação
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 1. Limpa o lixo (Cookies, Menus)
+        soup = clean_html_noise(soup)
+        
+        # 2. Encontra o bloco exato da vaga
+        content_block = find_job_content(soup)
+        
+        # 3. Formata o texto final
+        lines = []
+        for line in content_block.get_text("\n").splitlines():
+            clean_line = line.strip()
+            # Filtra linhas inúteis que sobraram
+            if len(clean_line) > 2 and clean_line.lower() not in ["aceitar", "fechar", "voltar"]:
+                lines.append(clean_line)
+        
+        extracted_text = "\n".join(lines)
+
+    except Exception as e:
+        print(f"Método local falhou ou foi bloqueado: {e}. Tentando Jina...")
+        extracted_text = "" # Força fallback
+
+    # --- TENTATIVA 2: Fallback para Jina Reader (Se o local falhar) ---
+    if not extracted_text or len(extracted_text) < 150:
+        try:
+            jina_url = f"https://r.jina.ai/{url}"
+            # Headers simples para o Jina
+            jheaders = {'User-Agent': 'Mozilla/5.0', 'X-Return-Format': 'markdown'}
+            r = requests.get(jina_url, headers=jheaders, timeout=20)
+            if r.status_code == 200:
+                # Mesmo com Jina, tentamos limpar banners comuns
+                raw_text = r.text
+                if "cookie" not in raw_text[:200].lower():
+                    extracted_text = raw_text
+        except:
+            pass
+
+    # Validação Final
+    if len(extracted_text) < 100:
+        return "⚠️ Não foi possível extrair o texto automaticamente (Site protegido ou conteúdo 100% JS). Por favor, copie e cole o texto manualmente na aba ao lado."
+        
+    return extracted_text
 
 def get_gemini_response(prompt, api_key, model_name="gemini-2.5-pro"):
     """Gera respostas usando a API do Gemini."""
@@ -126,26 +315,43 @@ def display_download_buttons(content, title, filename_prefix):
             key=f"md_{filename_prefix}",
             use_container_width=True
         )
+# Nome do arquivo onde as chaves serão salvas
+
+def save_keys_to_file(g_key, g_cx, gem_key):
+    """Salva as chaves no arquivo JSON."""
+    data = {"g_key": g_key, "g_cx": g_cx, "gem_key": gem_key}
+    with open(KEYS_FILE, "w") as f:
+        json.dump(data, f)
+
 
 # --- SIDEBAR DE CONFIGURAÇÃO ---
 with st.sidebar:
     st.header("⚙️ Configurações")
     with st.expander("🔑 Gerenciar Chaves de API", expanded=True):
-        g_key = st.text_input("Google API Key", value=st.session_state.get('g_key', ''), type="password")
-        g_cx = st.text_input("Google CX ID", value=st.session_state.get('g_cx', ''), type="password")
-        gem_key = st.text_input("Gemini API Key", value=st.session_state.get('gem_key', ''), type="password")
+        # O value agora pega do session_state, que pode ter vindo do arquivo
+        g_key = st.text_input("Google API Key", value=st.session_state.get('g_key') or '', type="password")
+        g_cx = st.text_input("Google CX ID", value=st.session_state.get('g_cx') or '', type="password")
+        gem_key = st.text_input("Gemini API Key", value=st.session_state.get('gem_key') or '', type="password")
 
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             if st.button("💾 Salvar", use_container_width=True):
+                # Atualiza a sessão atual
                 st.session_state.g_key = g_key
                 st.session_state.g_cx = g_cx
                 st.session_state.gem_key = gem_key
-                st.success("Salvo!")
+                
+                # --- AQUI: Salva no arquivo físico ---
+                save_keys_to_file(g_key, g_cx, gem_key)
+                st.success("Chaves salvas permanentemente!")
+                
         with col_btn2:
             if st.button("🗑️ Limpar", use_container_width=True):
                 for k in ['g_key', 'g_cx', 'gem_key']:
                     st.session_state[k] = ""
+                # Remove o arquivo físico se existir
+                if os.path.exists(KEYS_FILE):
+                    os.remove(KEYS_FILE)
                 st.rerun()
                 
         st.header("👤 Seu Perfil")
@@ -164,110 +370,115 @@ tab_busca, tab_analise, tab_preparacao = st.tabs(["🔍 Busca & Carga de Vagas",
 
 # --- ABA 1: BUSCA & CARGA DE VAGAS ---
 with tab_busca:
-    st.info("Utilize a busca por Dorks para encontrar vagas ou adicione uma vaga manualmente abaixo.")
+    st.info("Utilize a busca inteligente ou cole o link direto. O sistema agora suporta sites dinâmicos (Gupy, LinkedIn, etc).")
 
-    with st.expander("🔍 Buscar Vagas com Google", expanded=True):
-        # Criação de um formulário para evitar recargas desnecessárias ao digitar
+    # --- SEÇÃO 1: BUSCA GOOGLE ---
+    with st.expander("🔍 Buscar Vagas (Google Custom Search)", expanded=True):
         with st.form("search_form"):
             col1, col2 = st.columns([3, 1])
             with col1:
-                cargo = st.text_input("Cargo ou Habilidade:", placeholder="Ex: Engenheiro de Dados Pleno")
-                local = st.text_input("Localização (Opcional):", placeholder="Ex: Remoto ou São Paulo")
+                # Adicionei 'jobs' no placeholder para incentivar termos melhores
+                cargo = st.text_input("Cargo / Keywords:", placeholder="Ex: Python Developer Pleno Gupy")
+                local = st.text_input("Localização:", placeholder="Ex: Brasil (Remoto)")
             with col2:
-                st.write("") # Espaçador para alinhar o botão
                 st.write("") 
-                submit_search = st.form_submit_button("🔎 Buscar Vagas", use_container_width=True)
+                st.write("") 
+                submit_search = st.form_submit_button("🔎 Buscar", use_container_width=True)
 
         if submit_search:
-            # Validação de credenciais
             g_key_val = st.session_state.get('g_key')
             g_cx_val = st.session_state.get('g_cx')
             
             if not g_key_val or not g_cx_val:
-                st.warning("⚠️ Configure as chaves da API do Google na barra lateral antes de buscar.")
+                st.warning("⚠️ Configure as chaves do Google na sidebar.")
             elif not cargo:
-                st.warning("⚠️ Por favor, digite um cargo ou habilidade.")
+                st.warning("⚠️ Digite um cargo.")
             else:
-                # Montagem da Query Dork
-                dork_query = f'intitle:"{cargo}" inurl:(vaga | emprego | careers | jobs) "{local if local else ""}" -site:linkedin.com/in/* -site:facebook.com -site:glassdoor.com'
+                # Dork Otimizada para evitar agregadores de spam
+                dork_query = f'intitle:"{cargo}" "{local if local else ""}" (site:gupy.io OR site:linkedin.com/jobs OR site:glassdoor.com.br OR site:greenhouse.io OR site:lever.co) -inurl:login'
                 
-                # Execução da busca
                 results = util_google_search(dork_query, g_key_val, g_cx_val)
                 if results:
                     st.session_state.search_results = results
-                    st.success(f"Encontradas {len(results)} oportunidades!")
+                    st.success(f"Encontradas {len(results)} vagas em sites de alta relevância!")
                 else:
-                    st.error("Nenhum resultado encontrado. Verifique suas chaves ou tente termos mais genéricos.")
+                    st.warning("Nenhum resultado. Tente remover filtros de localização.")
 
-        # Exibição dos resultados (fora do formulário)
+        # Exibição dos Resultados
         if st.session_state.get('search_results'):
-            st.markdown("### 📋 Resultados Encontrados")
+            st.markdown("### 🎯 Selecione para Analisar")
             for i, r in enumerate(st.session_state.search_results):
                 with st.container():
-                    st.markdown(f"""
-                    <div class='job-card'>
-                        <h4>{r.get('title', 'Sem título')}</h4>
-                        <p style='color: #00e5ff;'>{r.get('displayLink', '')}</p>
-                        <p>{r.get('snippet', 'Sem descrição disponível.')}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    col_info, col_action = st.columns([4, 1])
+                    with col_info:
+                        st.markdown(f"**[{r.get('title')}]({r.get('link')})**")
+                        st.caption(f"{r.get('displayLink')} • {r.get('snippet')[:100]}...")
+                    with col_action:
+                        # Botão com chave única e callback visual
+                        if st.button("Analisar ⚡", key=f"btn_search_{i}", use_container_width=True):
+                            with st.spinner("Lendo vaga (renderizando JS)..."):
+                                content = scrape_job_description(r['link'])
+                                
+                                st.session_state.selected_job = r
+                                st.session_state.job_description = content
+                                # Reset de estados
+                                st.session_state.analysis_result = None
+                                st.session_state.cv_text_out = None
+                                st.session_state.cl_text_out = None
+                                st.session_state.inst_out = None
+                                
+                                st.toast("Vaga carregada e lida com sucesso!", icon="🚀")
+                                st.rerun()
+
+    st.markdown("---")
+
+    # --- SEÇÃO 2: LINK OU TEXTO MANUAL ---
+    manual_tab1, manual_tab2 = st.tabs(["🔗 Link Direto (Melhorado)", "📝 Texto Manual"])
+    
+    with manual_tab1:
+        st.write("Cola o link de sites como **Gupy, LinkedIn, Vagas.com**. O sistema tentará ler o conteúdo completo.")
+        url_input = st.text_input("URL da Vaga:", placeholder="https://...")
+        
+        if st.button("🚀 Extrair Conteúdo do Link", use_container_width=True):
+            if url_input:
+                with st.spinner("Acessando site e extraindo texto..."):
+                    job_text = scrape_job_description(url_input)
                     
-                    if st.button(f"Analisar Vaga #{i+1}", key=f"sel_search_{i}", use_container_width=True):
-                        st.session_state.selected_job = r
-                        st.session_state.job_description = scrape_job_description(r['link'])
-                        # Limpa estados de análise anteriores para nova rodada
+                    if len(job_text) > 200:
+                        st.session_state.selected_job = {
+                            'title': f"Vaga Importada: {url_input[:30]}...",
+                            'link': url_input,
+                            'displayLink': 'Importação Direta',
+                            'snippet': 'N/A'
+                        }
+                        st.session_state.job_description = job_text
+                        
+                        # Limpa resultados anteriores
                         st.session_state.analysis_result = None
                         st.session_state.cv_text_out = None
                         st.session_state.cl_text_out = None
                         st.session_state.inst_out = None
-                        st.toast(f"Vaga selecionada!", icon="✅")
-                        st.rerun()
 
-    st.markdown("---")
-    # ... (Manter o restante do código de "Adicionar Vaga Manualmente" conforme original)
-
-    manual_tab1, manual_tab2 = st.tabs(["Analisar a partir de um Link", "Analisar a partir de Texto"])
-    with manual_tab1:
-        url_input = st.text_input("Cole o link da vaga aqui:", placeholder="https://exemplo.com/carreiras/vaga-de-engenheiro")
-        if st.button("🔗 Extrair e Analisar Link", use_container_width=True, key="btn_link"):
-            if url_input:
-                job_desc = scrape_job_description(url_input)
-                if "Erro" not in job_desc:
-                    st.session_state.selected_job = {
-                        'title': f"Vaga do Link: {url_input[:50]}...",
-                        'link': url_input, 'displayLink': url_input,
-                        'snippet': job_desc[:150] + '...'
-                    }
-                    st.session_state.job_description = job_desc
-                    st.session_state.analysis_result = None # Limpa análise anterior
-                    st.session_state.cv_text_out = None # Limpa docs anteriores
-                    st.session_state.cl_text_out = None
-                    st.session_state.inst_out = None
-                    st.toast(f"Dados do link extraídos com sucesso!", icon="✅")
-                    st.rerun()
-                else:
-                    st.error(f"Não foi possível extrair os dados. Detalhe: {job_desc}")
+                        st.success("Conteúdo extraído com sucesso!")
+                        with st.expander("Ver conteúdo extraído"):
+                            st.markdown(job_text[:1000] + " [...]")
+                    else:
+                        st.error("Não foi possível ler o texto. O site pode ter bloqueio forte. Tente copiar e colar na aba 'Texto Manual'.")
             else:
-                st.warning("Por favor, insira um link.")
+                st.warning("Insira uma URL válida.")
 
     with manual_tab2:
-        manual_title = st.text_input("Título da Vaga:", key="manual_title")
-        manual_desc = st.text_area("Descrição da Vaga:", height=200, key="manual_desc")
-        if st.button("✍️ Usar Texto para Análise", use_container_width=True, key="btn_text"):
+        # (Mantém o código original desta aba, pois já funciona bem para Ctrl+C/Ctrl+V)
+        manual_title = st.text_input("Título da Vaga:", key="manual_title_input")
+        manual_desc = st.text_area("Descrição Completa:", height=200, key="manual_desc_input")
+        if st.button("Salvar Texto Manual", use_container_width=True):
             if manual_title and manual_desc:
-                st.session_state.selected_job = {
-                    'title': manual_title, 'link': 'N/A (Entrada Manual)',
-                    'displayLink': 'Entrada Manual', 'snippet': manual_desc[:150] + '...'
-                }
+                st.session_state.selected_job = {'title': manual_title, 'link': '#', 'displayLink': 'Manual', 'snippet': manual_desc[:50]}
                 st.session_state.job_description = manual_desc
-                st.session_state.analysis_result = None # Limpa análise anterior
-                st.session_state.cv_text_out = None # Limpa docs anteriores
-                st.session_state.cl_text_out = None
-                st.session_state.inst_out = None
-                st.toast(f"Vaga '{manual_title}' carregada para análise!", icon="✅")
-                st.rerun()
+                st.session_state.analysis_result = None
+                st.toast("Vaga manual salva!", icon="💾")
             else:
-                st.warning("Por favor, preencha o título e a descrição da vaga.")
+                st.warning("Preencha título e descrição.")
 
 # --- ABA 2: ANÁLISE DE MATCH ---
 with tab_analise:
