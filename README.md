@@ -124,3 +124,39 @@ Push para a Branch (git push origin feature/MinhaFeature)
 Abra um Pull Request
 
 Criado por Ricardo B Meneses
+
+📝 Mini-Tutorial: Como obter as Chaves de Acesso
+Para usar o Cognos Job AI online, você precisa de 3 chaves gratuitas do Google. O processo leva cerca de 5 minutos.
+
+1️⃣ Chave Gemini (IA) - A mais fácil
+Acesse: Google AI Studio
+
+Faça login com sua conta Google.
+
+Clique em "Create API key" (Criar chave de API).
+
+Copie o código gerado. Esta é sua Gemini API Key.
+
+2️⃣ Motor de Busca Personalizado (CX ID)
+Acesse: Programmable Search Engine
+
+Em "Nome do motor de pesquisa", digite qualquer coisa (ex: "Vagas").
+
+Importante: Em "O que pesquisar?", selecione "Pesquisar em toda a Web".
+
+Clique em "Criar".
+
+Na tela seguinte, copie o código que aparece em "ID do motor de pesquisa" (geralmente começa com números e letras como 012345...). Este é seu Google CX ID.
+
+3️⃣ Chave da API de Busca (Google Custom Search Key)
+Acesse o Google Cloud Console.
+
+Crie um novo projeto (ou selecione um existente).
+
+Na barra de busca no topo, digite "Custom Search API", clique nela e depois em "Ativar".
+
+No menu lateral, vá em "Credenciais" -> "Criar Credenciais" -> "Chave de API".
+
+Copie a chave gerada. Esta é sua Google API Key.
+
+💡 Dica: O Google oferece uma cota gratuita generosa para testes pessoais (100 buscas/dia na API de Search e uso gratuito do Gemini Free).
